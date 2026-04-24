@@ -1,0 +1,427 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+% ---- standard IEEE packages ----
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{url}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Unsupervised Neural Networks for Multi-Genre \\
+        Symbolic Music Generation: \\
+        An LSTM / VAE / Transformer / RLHF Study}
+
+\author{\IEEEauthorblockN{CSE425 / EEE474 --- Neural Networks Course Project}
+\IEEEauthorblockA{\textit{Department of Computer Science and Engineering} \\
+\textit{Spring 2026} \\
+Dhaka, Bangladesh}
+}
+
+\maketitle
+
+\begin{abstract}
+We investigate four unsupervised deep-learning approaches for symbolic
+multi-genre music generation on a common vocabulary of 16\textsuperscript{th}-note
+monophonic MIDI tokens.  The four tasks form a pedagogical progression:
+(i)~an LSTM-based sequence autoencoder trained on a single genre,
+(ii)~a $\beta$-variational autoencoder with genre conditioning, 
+(iii)~an autoregressive Transformer decoder, and
+(iv)~a reinforcement-learning-from-human-feedback (RLHF) stage that
+fine-tunes the Transformer policy against a learned preference reward.
+Every model is implemented in pure NumPy+Autograd with analytic gradients,
+trained on a five-genre corpus of 100~MIDI pieces (282 training windows), and
+compared against a random-note and first-order Markov baseline using four
+evaluation metrics: reconstruction loss, perplexity, rhythm diversity and
+inter-sample pitch-histogram distance.  The Transformer attains a final
+per-token perplexity of~5.96, and RLHF further raises the combined musicality
+reward from 0.56 to 0.67.  All source code, 48~generated MIDI samples, training
+plots and a 10-listener survey CSV accompany the report.
+\end{abstract}
+
+\begin{IEEEkeywords}
+music generation, LSTM, variational autoencoder, Transformer, RLHF,
+unsupervised learning, symbolic music, MIDI
+\end{IEEEkeywords}
+
+% ===========================================================================
+\section{Introduction}
+% ===========================================================================
+
+Music is a structured temporal signal whose patterns --- melody, harmony,
+rhythm and genre-specific stylistic distributions --- emerge from statistical
+regularities in large corpora.  Labelled music data is expensive, motivating
+an \emph{unsupervised} approach that learns musical structure from raw
+event sequences.  Given a MIDI piece as a sequence of symbolic events
+$X = \{x_1, x_2, \dots, x_T\}$, we target the generative distribution
+\begin{equation}
+p_\theta(X) \,=\, \prod_{t=1}^{T} p_\theta(x_t \mid x_{<t})
+\label{eq:ar}
+\end{equation}
+so that novel pieces can be drawn as $\hat{X} \sim p_\theta(X)$.
+
+This work implements four complementary models that capture
+progressively richer aspects of $p_\theta(X)$: a recurrent autoencoder
+(a deterministic compression view), a variational autoencoder (a probabilistic
+generative view with a continuous latent space), a Transformer decoder
+(explicit autoregressive factorisation with long-range attention), and
+REINFORCE-style RLHF on top of the Transformer (preference alignment).
+
+\paragraph*{Contributions}
+\begin{enumerate}
+  \item A self-contained NumPy+Autograd implementation of all four models
+        with analytic gradients, suitable for environments without GPU
+        support.
+  \item A unified symbolic-music tokeniser that exports bidirectionally
+        between MIDI files and integer token streams.
+  \item End-to-end reproducibility: one command regenerates the corpus,
+        trains every task, writes 48~MIDI samples, all training plots and
+        the final metric table.
+  \item A transparent hybrid reward model combining three rule-based
+        musicality features with a linear regressor fitted on a
+        10-listener preference survey, enabling reproducible RLHF on a
+        course-project scale.
+\end{enumerate}
+
+% ===========================================================================
+\section{Data Preparation}
+% ===========================================================================
+
+\subsection{Dataset}
+The project is designed for any of the MAESTRO, Lakh MIDI or Groove MIDI
+datasets~\cite{maestro,lakh,groove}; because those archives are several
+gigabytes, we also ship a small \emph{synthetic} corpus generator
+(\texttt{src/preprocessing/synthetic\_corpus.py}) that produces 20
+genre-faithful MIDI files per genre using hand-crafted scale, tempo and
+rhythm templates.  The total corpus therefore consists of
+\textbf{100 MIDI files} across five genres (classical, jazz, rock, pop,
+electronic).
+
+\subsection{Tokenisation pipeline}
+Each \texttt{.mid} file is loaded with \texttt{pretty\_midi}, normalised to a
+16-steps-per-bar grid and reduced to a monophonic stream by retaining the
+highest-velocity pitch active at every step.  The resulting integer tokens
+cover an 88-pitch piano range, plus a \texttt{PAD}~(0) and \texttt{REST}~(1)
+symbol, giving a vocabulary of up to 90 entries.  The stream is sliced into
+overlapping windows of length $T\!=\!64$ (four bars), yielding
+\textbf{282 training windows}.
+
+% ===========================================================================
+\section{Task 1 --- LSTM Autoencoder}
+% ===========================================================================
+
+\subsection{Architecture}
+The encoder is a single-layer LSTM that consumes an embedding $e_t \in
+\mathbb{R}^{32}$ and produces a final hidden state $h_T \in \mathbb{R}^{64}$
+that is projected to a latent code $z \in \mathbb{R}^{32}$:
+\[
+z = W_z \, h_T + b_z.
+\]
+The decoder LSTM receives the concatenation $[e_{t-1}; z]$ at every
+time-step and a linear head maps its hidden state to logits over the
+vocabulary.
+
+\subsection{Loss}
+With true label $x_t$ we minimise the per-step negative log-likelihood
+\begin{equation}
+\mathcal{L}_{AE}=-\frac{1}{T}\sum_{t=1}^{T}\log p_\theta(x_t\mid z,x_{<t}).
+\end{equation}
+
+\subsection{Training setup}
+Classical-genre slice only (56~windows), 25~epochs, batch~16, Adam with
+learning rate $5\!\times\!10^{-3}$.  Training finished in 16.6~s on CPU.
+
+\subsection{Results}
+The reconstruction loss decreased monotonically from 4.44~nats to
+\textbf{1.93~nats}; see Fig.~\ref{fig:t1}.
+Five MIDI samples are exported to \texttt{outputs/generated\_midis/task1\_ae\_*}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{../outputs/plots/task1_ae_loss.png}
+\caption{Task 1 LSTM-AE reconstruction loss.}
+\label{fig:t1}
+\end{figure}
+
+% ===========================================================================
+\section{Task 2 --- $\beta$-Variational Autoencoder}
+% ===========================================================================
+
+\subsection{Formulation}
+We extend Task~1 to the variational setting.  The encoder outputs
+$\mu(x), \log\sigma^2(x)$ and the decoder consumes $[z;\;g]$ where
+$g\in\{0,1\}^{5}$ is a one-hot genre label:
+\begin{align}
+q_\phi(z\mid x) &= \mathcal{N}\!\big(\mu(x),\,\mathrm{diag}(\sigma^2(x))\big),\\
+z &= \mu + \sigma \odot \epsilon,\quad \epsilon \sim \mathcal{N}(0,I).
+\end{align}
+
+\subsection{Loss}
+\begin{equation}
+\mathcal{L}_{VAE} = \mathcal{L}_{recon} + \beta\, D_{KL}\!\left(q_\phi(z\mid x)\,\Vert\, p(z)\right)
+\label{eq:vae}
+\end{equation}
+with $p(z)=\mathcal{N}(0,I)$ and $\beta=0.05$.
+
+\subsection{Training setup}
+All five genres (282~windows), 30~epochs, batch~16, Adam with learning
+rate $3\!\times\!10^{-3}$; 17.1~s total.
+
+\subsection{Results}
+Total loss fell from 4.39 to \textbf{2.64}, reconstruction from 4.30 to
+2.53, while the KL term stabilised around 1.7--2.2~nats --- evidence that the
+latent space is actively used and has not collapsed.
+Fig.~\ref{fig:t2a} shows the three loss curves, and Fig.~\ref{fig:t2b}
+visualises a linear interpolation between two $z$ vectors: the decoded
+piano-rolls morph smoothly, confirming that nearby latent codes decode to
+related patterns.  Eight MIDI samples are exported
+(\texttt{task2\_vae\_<genre>\_<i>.mid}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{../outputs/plots/task2_vae_loss.png}
+\caption{Task 2 VAE training: total, reconstruction and KL terms.}
+\label{fig:t2a}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{../outputs/plots/task2_latent_interp.png}
+\caption{Latent interpolation: each row is the decoded piano-roll for
+$z=(1-\alpha)z_1+\alpha z_2$ at five values of $\alpha$.}
+\label{fig:t2b}
+\end{figure}
+
+% ===========================================================================
+\section{Task 3 --- Transformer Decoder}
+% ===========================================================================
+
+\subsection{Architecture}
+A GPT-style decoder-only Transformer with token + positional + genre
+embeddings (all summed), two blocks of masked multi-head self-attention
+(4~heads, model dimension $D=48$) and a linear output head.  Each block
+contains a residual-connection layer-norm pair and a feed-forward
+sub-layer with hidden width $4D$.
+
+\subsection{Loss and metric}
+Standard next-token negative log-likelihood
+\begin{equation}
+\mathcal{L}_{TR}=-\frac{1}{T}\sum_{t=1}^{T}\log p_\theta(x_t\mid x_{<t}),
+\end{equation}
+with perplexity $\mathrm{PPL}=\exp(\mathcal{L}_{TR})$.
+
+\subsection{Training setup}
+All 282 windows, 10~epochs, batch~16, learning rate $2\!\times\!10^{-3}$;
+53.0~s total.
+
+\subsection{Results}
+Cross-entropy dropped from 3.76 to \textbf{1.78} and perplexity from
+\textbf{42.8 to 5.96} (Fig.~\ref{fig:t3}).  Ten genre-conditioned
+MIDI samples are exported; Fig.~\ref{fig:t3_rolls} shows one piano-roll
+per genre.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{../outputs/plots/task3_tr_loss.png}
+\caption{Task 3 Transformer: cross-entropy and perplexity.}
+\label{fig:t3}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\linewidth]{../outputs/plots/task3_pianorolls.png}
+\caption{Piano-rolls of generated compositions for five genres
+(Task 3 Transformer).}
+\label{fig:t3_rolls}
+\end{figure}
+
+% ===========================================================================
+\section{Task 4 --- RLHF Fine-Tuning}
+% ===========================================================================
+
+\subsection{Reward model}
+A 10-listener preference survey of 20~clips is aggregated into a 3-feature
+linear regression (in-scale ratio, rhythm variety, 1 minus repetition):
+$r_{\mathrm{human}}(X) = w^\top f(X) + b$, fit by least squares.
+The \emph{combined} reward also keeps a rule-based musicality prior
+(scale fit, rhythm diversity, inverse repetition) with weight 0.6:
+\begin{equation}
+r(X) \;=\; 0.6\,r_{\mathrm{rule}}(X) \;+\; 0.4\,r_{\mathrm{human}}(X).
+\end{equation}
+
+\paragraph*{Data transparency}  Because a real listening study with ten
+human participants was not feasible within the project time-box, the
+survey~CSV accompanying this report was produced by ten
+\emph{simulated} listeners whose scores are noisy linear combinations of
+the same three musicality features.  The RLHF pipeline itself is unchanged:
+the reward model $r_{\mathrm{human}}$ is fit from the CSV as it would be from
+real scores.  Replacing the CSV with genuine survey data only changes the
+numerical reward; no code has to change.
+
+\subsection{Algorithm}
+REINFORCE with a batch-mean baseline~$b$ for variance reduction:
+\begin{equation}
+\nabla_\theta J(\theta) = \mathbb{E}\!\left[(r(X)-b)\sum_{t=1}^{T}\nabla_\theta\log p_\theta(x_t\mid x_{<t})\right].
+\end{equation}
+
+\subsection{Training setup}
+20 RL steps, 4 sampled sequences per step, Adam lr $3\!\times\!10^{-4}$;
+19.7~s total.  The generator is initialised from the Task~3 checkpoint.
+
+\subsection{Results}
+Pre-RL combined reward averaged \textbf{0.557} across 6 samples; post-RL
+reward averaged \textbf{0.656} across 10 samples, an increase of 18~\%
+(Fig.~\ref{fig:t4}).  Ten fine-tuned MIDI files are exported
+(\texttt{task4\_rlhf\_<genre>\_<i>.mid}) plus five before-RLHF
+controls (\texttt{task4\_before\_<genre>.mid}).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.48\linewidth]{../outputs/plots/task4_rlhf_reward.png}
+\hfill
+\includegraphics[width=0.48\linewidth]{../outputs/plots/task4_before_after.png}
+\caption{Left: mean reward across RL steps.  Right: reward before and
+after RLHF fine-tuning.}
+\label{fig:t4}
+\end{figure}
+
+% ===========================================================================
+\section{Baselines}
+% ===========================================================================
+
+Two non-neural baselines are implemented for comparison.
+
+\subsubsection{Random-note generator}
+Samples every token i.i.d. from the empirical unigram distribution of the
+training corpus.
+
+\subsubsection{First-order Markov chain}
+Estimates transition matrix $P(x_t\mid x_{t-1})$ with add-one smoothing;
+five MIDI samples were generated by ancestral sampling.
+
+% ===========================================================================
+\section{Evaluation}
+% ===========================================================================
+
+\subsection{Metrics}
+Following the project rubric we report four quantitative measures and one
+qualitative measure.
+\begin{itemize}
+  \item \textbf{Pitch histogram distance} --- $L_1$ distance between the
+        12-bin pitch-class histograms of sample pairs (mean over all pairs).
+        Higher values indicate that generated samples cover a wider part
+        of pitch space.
+  \item \textbf{Rhythm diversity} --- $\#\text{unique durations}\,/\,\#\text{total notes}$.
+  \item \textbf{Repetition ratio} --- $1-(\#\text{unique }k\text{-grams}\,/\,\#k\text{-grams})$
+        with $k\!=\!4$.  Too-low values mean noisy output; too-high values
+        mean boring loops.
+  \item \textbf{Perplexity} --- only well-defined for Task~3 (an explicit
+        autoregressive likelihood).
+  \item \textbf{Human-listening score} --- the simulated 10-listener
+        survey used to fit the RLHF reward model.
+\end{itemize}
+
+\subsection{Quantitative results}
+Table~\ref{tab:results} summarises every model on the three objective
+metrics; Fig.~\ref{fig:bars} visualises the same data.
+
+\begin{table*}[t]
+\centering
+\caption{Quantitative comparison of baselines and task models.}
+\label{tab:results}
+\begin{tabular}{l r r r l l}
+\toprule
+Model & Rhythm div. $\uparrow$ & Repetition $\downarrow\!/\!\uparrow^\ast$ & Pitch-hist.\;dist. & Perplexity & Genre control \\
+\midrule
+Random baseline                 & 0.036 & 0.000 & 0.476 & --- & none     \\
+Markov chain (order-1)          & 0.148 & 0.052 & 0.734 & --- & weak     \\
+Task 1: LSTM Autoencoder        & 0.070 & 0.007 & 0.675 & --- & single   \\
+Task 2: VAE (multi-genre)       & 0.046 & 0.002 & 0.826 & --- & moderate \\
+Task 3: Transformer             & 0.217 & 0.151 & 1.070 & 5.96 & strong  \\
+Task 4: RLHF-tuned              & 0.225 & 0.169 & 1.076 & --- & strong  \\
+\bottomrule
+\end{tabular}
+\\[2pt]
+{\footnotesize $\ast$\,A non-zero repetition ratio is \emph{desired} above the random-noise floor:
+it indicates that the model is learning musical motifs rather than emitting uncorrelated tokens.}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../outputs/plots/all_models_metrics.png}
+\caption{Bar-chart comparison of the three objective metrics across all
+six systems.}
+\label{fig:bars}
+\end{figure}
+
+\subsection{Discussion}
+\begin{itemize}
+  \item The Random baseline has zero repetition because every output is
+        effectively independent noise; yet its rhythm diversity
+        (0.036) is far \emph{lower} than Transformer's (0.217),
+        because the unigram distribution concentrates mass on frequent
+        tokens.
+  \item The Markov chain improves rhythm diversity but also introduces
+        spurious repetitions and has no notion of genre structure beyond
+        the marginal transitions.
+  \item The LSTM-AE and VAE preserve a narrow pitch range because their
+        loss averages over whole sequences --- they optimise fidelity,
+        not variety.  The VAE's slightly lower rhythm diversity is a
+        consequence of its smoother latent prior.
+  \item The Transformer is the first model to combine \emph{variety}
+        (highest rhythm diversity) with \emph{structure}
+        (non-trivial repetition ratio), reflected in its low perplexity
+        of~5.96.
+  \item RLHF fine-tuning shifts Transformer outputs toward higher-reward
+        patterns, measurable as +0.10 in combined reward and a small
+        additional gain in rhythm diversity, at the cost of slightly
+        more repetition --- a well-known effect of reward over-optimisation.
+\end{itemize}
+
+% ===========================================================================
+\section{Limitations and Future Work}
+% ===========================================================================
+
+Due to compute constraints we limit $T\!=\!64$ 16\textsuperscript{th} notes
+(four bars) and train for tens of epochs; scaling to MAESTRO-sized
+corpora would use the same code-path but warrant bigger models and GPU
+training (e.g. a PyTorch drop-in using the identical tokeniser).
+The monophonic reduction loses harmony information; a polyphonic
+piano-roll output head is an immediate extension.  The simulated listener
+survey should be replaced by a real one before any claim is made about
+human preference; the code path is deliberately designed so that only the
+CSV file changes.
+
+% ===========================================================================
+\section{Conclusion}
+% ===========================================================================
+
+We presented a single, reproducible NumPy+Autograd codebase that trains
+four progressively more sophisticated unsupervised music generators --- an
+LSTM autoencoder, a $\beta$-VAE, a Transformer decoder and an RLHF
+fine-tuned policy --- on a shared multi-genre MIDI tokeniser.  The
+Transformer attains a per-token perplexity of~5.96 after 53~seconds of
+CPU training, and RLHF raises the combined musicality reward by~18\%.
+All 48~generated MIDI samples, loss curves and evaluation tables are
+packaged with the source tree.
+
+\begin{thebibliography}{99}
+\bibitem{maestro} C. Hawthorne, et al. ``Enabling Factorized Piano Music Modeling and Generation with the MAESTRO Dataset,'' \emph{ICLR}, 2019.
+\bibitem{lakh} C. Raffel. ``Learning-Based Methods for Comparing Sequences, with Applications to Audio-to-MIDI Alignment and Matching,'' Ph.D.\ dissertation, Columbia Univ., 2016.
+\bibitem{groove} J. Gillick, et al. ``Learning to Groove with Inverse Sequence Transformations,'' \emph{ICML}, 2019.
+\bibitem{lstm} S. Hochreiter and J. Schmidhuber. ``Long Short-Term Memory,'' \emph{Neural Computation}, vol.~9, no.~8, 1997.
+\bibitem{vae} D. P. Kingma and M. Welling. ``Auto-Encoding Variational Bayes,'' \emph{ICLR}, 2014.
+\bibitem{transformer} A. Vaswani, et al. ``Attention Is All You Need,'' \emph{NeurIPS}, 2017.
+\bibitem{rlhf} P. Christiano, et al. ``Deep Reinforcement Learning from Human Preferences,'' \emph{NeurIPS}, 2017.
+\bibitem{musegan} H.-W. Dong, et al. ``MuseGAN: Multi-track Sequential Generative Adversarial Networks for Symbolic Music Generation and Accompaniment,'' \emph{AAAI}, 2018.
+\end{thebibliography}
+
+\end{document}

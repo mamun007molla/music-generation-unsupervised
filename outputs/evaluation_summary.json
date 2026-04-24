@@ -1,0 +1,44 @@
+[
+  {
+    "label": "Random baseline",
+    "rhythm_diversity": 0.036,
+    "repetition_ratio": 0.0,
+    "pitch_hist_distance": 0.476
+  },
+  {
+    "label": "Markov baseline",
+    "rhythm_diversity": 0.148,
+    "repetition_ratio": 0.052,
+    "pitch_hist_distance": 0.734
+  },
+  {
+    "label": "Task 1 \u2014 LSTM AE",
+    "rhythm_diversity": 0.07,
+    "repetition_ratio": 0.007,
+    "pitch_hist_distance": 0.675,
+    "final_loss": 1.933
+  },
+  {
+    "label": "Task 2 \u2014 VAE",
+    "rhythm_diversity": 0.046,
+    "repetition_ratio": 0.002,
+    "pitch_hist_distance": 0.826,
+    "final_loss": 2.641
+  },
+  {
+    "label": "Task 3 \u2014 Transformer",
+    "rhythm_diversity": 0.21,
+    "repetition_ratio": 0.151,
+    "pitch_hist_distance": 1.119,
+    "final_loss": 1.784,
+    "perplexity": 5.96
+  },
+  {
+    "label": "Task 4 \u2014 RLHF",
+    "rhythm_diversity": 0.235,
+    "repetition_ratio": 0.164,
+    "pitch_hist_distance": 1.183,
+    "final_reward_pre": 0.595,
+    "final_reward_post": 0.632
+  }
+]
